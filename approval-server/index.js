@@ -505,6 +505,13 @@ async function classifyAssistantQuestion(question, accountTokens) {
     },
   );
   if (!response.ok) {
+    const providerBody = await response.text();
+    let providerError = null;
+    try {
+      providerError = JSON.parse(providerBody).error || null;
+    } catch {
+      providerError = null;
+    }
     if (response.status === 429) {
       throw new HttpError(429, "The AI assistant has reached its current usage limit. Try again later.");
     }
@@ -512,6 +519,11 @@ async function classifyAssistantQuestion(question, accountTokens) {
       console.error("Gemini rejected the assistant request.", {
         status: response.status,
         model: process.env.GEMINI_MODEL || "gemini-2.5-flash",
+        providerStatus: providerError?.status || null,
+        providerCode: providerError?.code || null,
+        providerMessage: typeof providerError?.message === "string"
+          ? providerError.message.replaceAll(apiKey, "[REDACTED]").slice(0, 400)
+          : null,
       });
       throw new HttpError(502, "The AI assistant could not process that question.");
     }
