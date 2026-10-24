@@ -366,6 +366,374 @@ async function deleteAccount(data, adminUid) {
   };
 }
 
+const assistantOperations = new Set([
+  "summary",
+  "available_equipment",
+  "overdue_loans",
+  "pending_loans",
+  "active_borrowers",
+  "account_list",
+  "account_created",
+  "account_loans",
+  "busiest_day",
+]);
+const assistantRequests = new Map();
+
+function escapeRegExp(value) {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function replaceSensitiveValue(text, value, replacement) {
+  const escaped = escapeRegExp(value.trim());
+  if (!escaped) return text;
+  const pattern = new RegExp(`(^|[^a-z0-9])${escaped}(?=$|[^a-z0-9])`, "gi");
+  return text.replace(pattern, (_, prefix) => `${prefix}${replacement}`);
+}
+
+function sanitizeQuestion(question, accounts) {
+  let sanitized = question;
+  const accountTokens = new Map();
+  const orderedAccounts = accounts.slice().sort(
+    (a, b) => String(b.name || "").length - String(a.name || "").length,
+  );
+  orderedAccounts.forEach((account, index) => {
+    const token = `ACCOUNT_${index + 1}`;
+    const values = [account.name, account.email, account.idNumber]
+      .filter((value) => typeof value === "string" && value.trim());
+    for (const value of values) {
+      sanitized = replaceSensitiveValue(sanitized, value, `[${token}]`);
+    }
+    String(account.name || "").split(/\s+/).filter((part) => part.length >= 3)
+      .forEach((part) => {
+        const matchingAccounts = orderedAccounts.filter((entry) =>
+          String(entry.name || "").split(/\s+/).some(
+            (entryPart) => entryPart.toLowerCase() === part.toLowerCase(),
+          )
+        );
+        const replacement = matchingAccounts.length === 1
+          ? `[${token}]`
+          : "[PERSON]";
+        sanitized = replaceSensitiveValue(sanitized, part, replacement);
+        if (replacement === `[${token}]` && sanitized.includes(replacement)) {
+          accountTokens.set(token, account);
+        }
+      });
+    if (sanitized.includes(`[${token}]`)) {
+      accountTokens.set(token, account);
+    }
+  });
+  sanitized = sanitized
+    .replace(/\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b/gi, "[REDACTED]")
+    .replace(/\b\+?\d[\d\s().-]{6,}\d\b/g, "[REDACTED]");
+  const questionWords = new Set([
+    "a", "an", "and", "are", "as", "at", "be", "by", "can", "did", "do",
+    "does", "for", "from", "give", "has", "have", "how", "i", "in", "is",
+    "it", "list", "me", "many", "my", "of", "on", "or", "please", "show",
+    "tell", "the", "this", "to", "was", "what", "when", "where", "which",
+    "who", "with", "available", "borrowed", "borrowing", "camera", "cameras",
+    "computer", "computers", "device", "devices", "equipment", "item", "items",
+    "laptop", "laptops", "loan", "loans", "overdue", "pending", "projector",
+    "projectors", "request", "requests", "student", "students", "tablet",
+    "tablets", "account", "accounts", "faculty", "staff", "people", "users",
+    "returned", "sunday", "sundays", "monday", "mondays", "tuesday", "tuesdays",
+    "wednesday", "wednesdays", "thursday", "thursdays", "friday", "fridays",
+    "saturday", "saturdays", "january", "february", "march", "april", "may",
+    "june", "july", "august", "september", "october", "november", "december",
+  ]);
+  sanitized = sanitized.replace(/\b[A-Z][a-z]{2,}\b/g, (word) =>
+    questionWords.has(word.toLowerCase()) ? word : "[PERSON]"
+  );
+  return { question: sanitized.toLowerCase(), accountTokens };
+}
+
+async function classifyAssistantQuestion(question, accountTokens) {
+  const apiKey = process.env.GEMINI_API_KEY;
+  if (!apiKey) {
+    throw new HttpError(503, "The AI assistant is not configured yet.");
+  }
+
+  const operations = [...assistantOperations];
+  const tokens = [...accountTokens.keys()];
+  const response = await fetch(
+    `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(process.env.GEMINI_MODEL || "gemini-2.5-flash")}:generateContent`,
+    {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "x-goog-api-key": apiKey,
+      },
+      signal: AbortSignal.timeout(15_000),
+      body: JSON.stringify({
+        contents: [{
+          role: "user",
+          parts: [{
+            text: [
+              "Convert the admin's question into up to three database query operations.",
+              "Return only JSON matching the schema. Do not answer the question.",
+              `Allowed operation types: ${operations.join(", ")}.`,
+              "Use accountToken only when the question contains a supplied [ACCOUNT_n] token.",
+              `Available account tokens: ${tokens.length ? tokens.join(", ") : "none"}.`,
+              "Use category only when an equipment type/category is explicitly requested.",
+              "For unrelated, unsupported, or unclear requests return an empty operations array.",
+              "Question:",
+              question,
+            ].join("\n"),
+          }],
+        }],
+        generationConfig: {
+          responseMimeType: "application/json",
+          responseSchema: {
+            type: "OBJECT",
+            properties: {
+              operations: {
+                type: "ARRAY",
+                items: {
+                  type: "OBJECT",
+                  properties: {
+                    type: { type: "STRING", enum: operations },
+                    accountToken: { type: "STRING" },
+                    category: { type: "STRING" },
+                  },
+                  required: ["type"],
+                },
+              },
+            },
+            required: ["operations"],
+          },
+        },
+      }),
+    },
+  );
+  if (!response.ok) {
+    if (response.status === 429) {
+      throw new HttpError(429, "The AI assistant has reached its current usage limit. Try again later.");
+    }
+    if (response.status === 400 || response.status === 404) {
+      console.error("Gemini rejected the assistant request.", {
+        status: response.status,
+        model: process.env.GEMINI_MODEL || "gemini-2.5-flash",
+      });
+      throw new HttpError(502, "The AI assistant could not process that question.");
+    }
+    throw new HttpError(502, "The AI provider is temporarily unavailable.");
+  }
+
+  const payload = await response.json();
+  const text = payload.candidates?.[0]?.content?.parts
+    ?.map((part) => part.text || "")
+    .join("");
+  if (typeof text !== "string") {
+    throw new HttpError(502, "The AI assistant returned an invalid response.");
+  }
+  let parsed;
+  try {
+    parsed = JSON.parse(text);
+  } catch (error) {
+    throw new HttpError(502, "The AI assistant returned an invalid response.");
+  }
+  if (!parsed || !Array.isArray(parsed.operations) || parsed.operations.length > 3) {
+    throw new HttpError(502, "The AI assistant returned an invalid query.");
+  }
+
+  return parsed.operations.filter((operation) =>
+    operation &&
+    assistantOperations.has(operation.type) &&
+    (!operation.accountToken ||
+      (typeof operation.accountToken === "string" &&
+        accountTokens.has(operation.accountToken))) &&
+    (!operation.category ||
+      (typeof operation.category === "string" &&
+        operation.category.length <= 50))
+  );
+}
+
+function manilaDate() {
+  const parts = new Intl.DateTimeFormat("en-CA", {
+    timeZone: "Asia/Manila",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).formatToParts(new Date());
+  const values = Object.fromEntries(parts.map((part) => [part.type, part.value]));
+  return `${values.year}-${values.month}-${values.day}`;
+}
+
+function accountCreatedDate(account) {
+  const value = account.createdAt;
+  const date = value && typeof value.toDate === "function"
+    ? value.toDate()
+    : value == null ? null : new Date(value);
+  return date && !Number.isNaN(date.getTime())
+    ? date.toLocaleDateString("en-US", {
+      timeZone: "Asia/Manila",
+      year: "numeric",
+      month: "long",
+      day: "numeric",
+    })
+    : null;
+}
+
+function runAssistantOperation(operation, data, accountTokens) {
+  const today = manilaDate();
+  const accounts = data.accounts;
+  const equipment = data.equipment;
+  const loans = data.loans;
+  const approved = loans.filter((loan) => loan.status === "approved");
+  const overdue = approved.filter(
+    (loan) => typeof loan.end === "string" && loan.end < today,
+  );
+  const pending = loans.filter((loan) => loan.status === "pending");
+  const token = operation.accountToken;
+  const account = token ? accountTokens.get(token) : null;
+  const category = String(operation.category || "").trim().toLowerCase();
+  const equipmentMatches = (item) => !category ||
+    `${item.category || ""} ${item.name || ""}`.toLowerCase().includes(category);
+  const accountLoans = (target) => loans.filter((loan) =>
+    target && (
+      loan.borrowerUid === target.id ||
+      (!loan.borrowerUid &&
+        String(loan.borrower || "").trim().toLowerCase() ===
+          String(target.name || "").trim().toLowerCase())
+    )
+  );
+  const describeLoans = (records) => records.length
+    ? records.slice(0, 20).map((loan) =>
+      `${loan.name || "Unnamed item"} — ${loan.borrower || "Unknown borrower"} (${loan.status || "unknown"}${loan.end ? `, due ${loan.end}` : ""})`
+    ).join("; ")
+    : "none";
+
+  switch (operation.type) {
+    case "summary": {
+      const borrowedIds = new Set(approved.map((loan) => loan.equipmentId));
+      const available = equipment.filter((item) =>
+        !item.maintenance && !borrowedIds.has(item.id)
+      ).length;
+      return `Inventory: ${equipment.length} total, ${available} available, ${borrowedIds.size} borrowed, ${equipment.filter((item) => item.maintenance).length} in maintenance. Loans: ${pending.length} pending, ${overdue.length} overdue.`;
+    }
+    case "available_equipment": {
+      const borrowedIds = new Set(approved.map((loan) => loan.equipmentId));
+      const matches = equipment.filter((item) =>
+        equipmentMatches(item) &&
+        !item.maintenance &&
+        !borrowedIds.has(item.id)
+      );
+      return `${matches.length} available${category ? ` matching "${operation.category}"` : ""}: ${matches.slice(0, 30).map((item) => item.name || "Unnamed item").join(", ") || "none"}.`;
+    }
+    case "overdue_loans":
+      return `${overdue.length} overdue loan(s): ${describeLoans(overdue)}.`;
+    case "pending_loans":
+      return `${pending.length} pending request(s): ${describeLoans(pending)}.`;
+    case "active_borrowers": {
+      const people = new Map();
+      for (const loan of approved) {
+        const borrowerAccount = loan.borrowerUid
+          ? accounts.find((entry) => entry.id === loan.borrowerUid)
+          : null;
+        const name = borrowerAccount?.name || loan.borrower;
+        if (name) people.set(loan.borrowerUid || name.trim().toLowerCase(), name);
+      }
+      return `${people.size} people currently borrowing: ${[...people.values()].join(", ") || "none"}.`;
+    }
+    case "account_list":
+      return accounts.length
+        ? `Accounts (${accounts.length}): ${accounts.slice(0, 50).map((entry) =>
+          `${entry.name || "Unnamed"}${entry.role ? ` (${entry.role})` : ""}${accountCreatedDate(entry) ? `, created ${accountCreatedDate(entry)}` : ""}`
+        ).join("; ")}.`
+        : "There are no user accounts.";
+    case "account_created":
+      if (!account) return "Please include the account name so I can look up its creation date.";
+      return accountCreatedDate(account)
+        ? `${account.name || "That account"} was created on ${accountCreatedDate(account)}.`
+        : `No creation date is saved for ${account.name || "that account"}.`;
+    case "account_loans":
+      if (!account) return "Please include the account name so I can look up its loans.";
+      return `${account.name || "That account"}'s loans: ${describeLoans(accountLoans(account))}.`;
+    case "busiest_day": {
+      const counts = Array(7).fill(0);
+      for (const loan of loans.filter((entry) =>
+        entry.status === "approved" || entry.status === "returned"
+      )) {
+        const date = typeof loan.start === "string"
+          ? new Date(`${loan.start}T00:00:00`)
+          : null;
+        if (date && !Number.isNaN(date.getTime())) counts[date.getDay()] += 1;
+      }
+      const busiest = Math.max(...counts);
+      if (!busiest) return "There are no checkouts on record.";
+      const days = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
+      return `${days.filter((_, index) => counts[index] === busiest).join(" and ")} is busiest, with ${busiest} checkout(s) on record.`;
+    }
+    default:
+      return "I can’t answer that from the available database information.";
+  }
+}
+
+async function answerAssistant(data, adminUid) {
+  const question = data && data.question;
+  if (typeof question !== "string" || question.trim().length === 0 || question.length > 200) {
+    throw new HttpError(400, "Enter a question of no more than 200 characters.");
+  }
+  if (!process.env.GEMINI_API_KEY) {
+    throw new HttpError(503, "The AI assistant is not configured yet.");
+  }
+  const now = Date.now();
+  const recent = (assistantRequests.get(adminUid) || [])
+    .filter((timestamp) => now - timestamp < 60_000);
+  if (recent.length >= 10) {
+    throw new HttpError(429, "Too many assistant questions. Wait a minute and try again.");
+  }
+  assistantRequests.set(adminUid, [...recent, now]);
+
+  const accountSnapshot = await db.collection("accounts").get();
+  const accounts = accountSnapshot.docs.map((document) => ({
+    ...document.data(),
+    id: document.id,
+  }));
+  const { question: sanitizedQuestion, accountTokens } =
+    sanitizeQuestion(question, accounts);
+  const operations = await classifyAssistantQuestion(
+    sanitizedQuestion,
+    accountTokens,
+  );
+  if (operations.length === 0) {
+    return { answer: "I couldn’t identify a supported database question. Try asking about equipment, loans, account names or dates, or a dashboard summary." };
+  }
+  const needsEquipment = operations.some((operation) =>
+    ["summary", "available_equipment"].includes(operation.type)
+  );
+  const needsLoans = operations.some((operation) =>
+    [
+      "summary",
+      "available_equipment",
+      "overdue_loans",
+      "pending_loans",
+      "active_borrowers",
+      "account_loans",
+      "busiest_day",
+    ].includes(operation.type)
+  );
+  const [equipmentSnapshot, loanSnapshot] = await Promise.all([
+    needsEquipment ? db.collection("equipment").get() : null,
+    needsLoans ? db.collection("loans").get() : null,
+  ]);
+  const dataSets = {
+    accounts,
+    equipment: (equipmentSnapshot?.docs || []).map((document) => ({
+      ...document.data(),
+      id: document.id,
+    })),
+    loans: (loanSnapshot?.docs || []).map((document) => ({
+      ...document.data(),
+      id: document.id,
+    })),
+  };
+  return {
+    answer: operations.map((operation) =>
+      runAssistantOperation(operation, dataSets, accountTokens)
+    ).join("\n"),
+  };
+}
+
 const server = http.createServer(async (request, response) => {
   if (request.method === "GET" && request.url === "/health") {
     response.writeHead(200, {
@@ -396,7 +764,7 @@ const server = http.createServer(async (request, response) => {
   }
   if (
     request.method !== "POST" ||
-    !["/approve-account", "/delete-account"].includes(request.url)
+    !["/approve-account", "/delete-account", "/assistant"].includes(request.url)
   ) {
     sendJson(response, 404, { error: "Endpoint not found." }, origin);
     return;
@@ -407,12 +775,14 @@ const server = http.createServer(async (request, response) => {
     const data = await readJson(request);
     const result = request.url === "/approve-account"
       ? await approveRequest(data)
-      : await deleteAccount(data, adminUid);
+      : request.url === "/delete-account"
+        ? await deleteAccount(data, adminUid)
+        : await answerAssistant(data, adminUid);
     sendJson(response, 200, result, origin);
   } catch (error) {
     const status = error instanceof HttpError ? error.status : 500;
     if (!(error instanceof HttpError)) {
-      console.error("Unhandled account approval error.", error);
+      console.error("Unhandled approval-service request error.", error);
     }
     sendJson(response, status, { error: error.message }, origin);
   }

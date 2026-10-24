@@ -1264,7 +1264,20 @@
   }
 
   /* ---------- assistant ---------- */
-  var ASK = [['overdue', "What's overdue?"], ['available', "What's available?"], ['pending', 'Pending requests'], ['busiest', 'Busiest day'], ['summary', 'Quick summary']];
+  var ASK = [['overdue', "What's overdue?"], ['available', "What's available?"], ['borrowers', 'How many are borrowing?'], ['accounts', 'Account names'], ['pending', 'Pending requests'], ['busiest', 'Busiest day'], ['summary', 'Quick summary']];
+  function activeBorrowers() {
+    var seen = Object.create(null);
+    return db.loans.filter(function (loan) {
+      return loan.status === 'approved';
+    }).reduce(function (borrowers, loan) {
+      var name = borrowerName(loan);
+      var key = loan.borrowerUid ? 'uid:' + loan.borrowerUid : 'name:' + normName(name);
+      if (key === 'name:' || seen[key]) return borrowers;
+      seen[key] = true;
+      borrowers.push(name || 'Unknown borrower');
+      return borrowers;
+    }, []);
+  }
   function answer(key) {
     var s = stats(), t = today(), list;
     if (key === 'overdue') {
@@ -1279,6 +1292,26 @@
       list = db.loans.filter(function (l) { return l.status === 'pending'; });
       return list.length ? plural(list.length, 'request') + ' waiting: ' + list.map(function (l) { return borrowerName(l) + ' wants ' + l.name + ' (' + fmt(l.start) + ')'; }).join('; ') + '.' : 'No pending requests. The approval queue is clear.';
     }
+    if (key === 'borrowers') {
+      list = activeBorrowers();
+      return list.length
+        ? list.length + ' ' + (list.length === 1 ? 'person is' : 'people are') + ' currently borrowing: ' + list.join(', ') + '.'
+        : 'No one is currently borrowing equipment.';
+    }
+    if (key === 'accounts') {
+      list = db.accounts.slice().sort(function (a, b) { return String(a.name || '').localeCompare(String(b.name || '')); });
+      return list.length
+        ? list.map(function (account) {
+          return (account.name || 'Unnamed account') +
+            (account.role ? ' (' + account.role + ')' : '') + ' — ' + accountCreatedDate(account);
+        }).join(', ') + '.'
+        : 'There are no user accounts in the database.';
+    }
+    if (key === 'account-created') {
+      var account = mentionedAccount(state.lastQuestion || '');
+      if (!account) return 'I couldn\u2019t find that account. Please include the person\u2019s name in your question.';
+      return account.name + '\u2019s account record ' + accountCreatedDate(account) + '.';
+    }
     if (key === 'busiest') {
       var by = [0, 0, 0, 0, 0, 0, 0];
       db.loans.filter(isCheckout).forEach(function (l) { by[parse(l.start).getDay()]++; });
@@ -1288,16 +1321,80 @@
     return s.total + ' items: ' + s.available + ' available, ' + s.borrowed + ' borrowed, ' + s.maintenance + ' in maintenance. ' +
       s.pending + ' pending and ' + s.overdue + ' overdue.';
   }
+  function accountCreatedDate(account) {
+    if (account.createdAt == null) return 'has no creation date saved';
+    var createdAt = typeof account.createdAt.toDate === 'function'
+      ? account.createdAt.toDate()
+      : new Date(account.createdAt);
+    if (isNaN(createdAt.getTime())) return 'has an invalid saved creation date';
+    return 'was created on ' + MON[createdAt.getMonth()] + ' ' +
+      createdAt.getDate() + ', ' + createdAt.getFullYear();
+  }
+  function mentionedAccount(text) {
+    var question = normName(text);
+    var accounts = db.accounts.slice().sort(function (a, b) {
+      return String(b.name || '').length - String(a.name || '').length;
+    });
+    return accounts.find(function (account) {
+      var name = normName(account.name);
+      var email = normName(account.email);
+      return (name && question.indexOf(name) !== -1) ||
+        (email && question.indexOf(email) !== -1);
+    }) || null;
+  }
   function answerFreeText(text) {
     var t = text.toLowerCase();
-    var key = /overdue|late/.test(t) ? 'overdue'
+    state.lastQuestion = text;
+    var key = /\b(?:when|what date).*(?:account|created|made|join(?:ed)?|registered|signed up)|(?:account|created|made|join(?:ed)?|registered|signed up).*(?:when|date)/.test(t) ? 'account-created'
+      : /\b(?:who|list|show|what are).*(?:users?|accounts?|members?|students?|faculty|names?)\b|\b(?:account|user|member)\s+names?\b/.test(t) ? 'accounts'
+      : /(?:how many|number of|count of).*(?:people|users|borrowers?|borrowing|borrow)|who(?:'s| is) borrowing/.test(t) ? 'borrowers'
+      : /overdue|late/.test(t) ? 'overdue'
       : /available|free|open/.test(t) ? 'available'
       : /pending|waiting|queue|request/.test(t) ? 'pending'
       : /busiest|busy|popular|peak/.test(t) ? 'busiest'
       : /summary|overview|status|how.*(going|things)/.test(t) ? 'summary'
       : null;
-    if (key) return answer(key);
-    return "I don't have a ready answer for that yet \u2014 I can only check equipment status, pending requests, overdue items, the busiest day, and a quick summary. Try one of the buttons above, or rephrase around one of those.";
+    return key ? answer(key) : null;
+  }
+  function askAssistantApi(question, message) {
+    var endpoint = String(window.LENDY_APPROVAL_API_URL || '').trim().replace(/\/+$/, '');
+    if (!endpoint) {
+      message.text = 'The AI assistant service URL is not configured. Please contact the administrator.';
+      renderAssistant();
+      return;
+    }
+    if (!auth.currentUser) {
+      message.text = 'Your admin sign-in has expired. Sign in again to ask a question.';
+      renderAssistant();
+      return;
+    }
+    auth.currentUser.getIdToken()
+      .then(function (idToken) {
+        return fetch(endpoint + '/assistant', {
+          method: 'POST',
+          headers: {
+            Authorization: 'Bearer ' + idToken,
+            'Content-Type': 'application/json'
+          },
+          body: JSON.stringify({ question: question })
+        });
+      })
+      .then(function (response) {
+        return response.json().then(function (body) {
+          if (!response.ok) throw new Error(body.error || 'Assistant service returned HTTP ' + response.status + '.');
+          if (typeof body.answer !== 'string') throw new Error('Assistant service returned an invalid answer.');
+          return body.answer;
+        });
+      })
+      .then(function (answerText) {
+        message.text = answerText;
+        renderAssistant();
+      })
+      .catch(function (err) {
+        console.error('Lendy assistant request failed.', err);
+        message.text = err.message || 'Could not reach the assistant. Please try again.';
+        renderAssistant();
+      });
   }
   function submitAssistant(form) {
     var input = document.getElementById('assistant-input');
@@ -1310,7 +1407,16 @@
     if (!text) return;
     state.chat.push({ from: 'me', text: text });
     try {
-      state.chat.push({ from: 'bot', text: key ? answer(key) : answerFreeText(text) });
+      var localAnswer = key ? answer(key) : answerFreeText(text);
+      var complexQuestion = /\b(and|also|plus|while|along with|as well as|both)\b/i.test(text);
+      if (!key && (localAnswer === null || complexQuestion)) {
+        var pendingMessage = { from: 'bot', text: 'Checking the database…' };
+        state.chat.push(pendingMessage);
+        renderAssistant();
+        askAssistantApi(text, pendingMessage);
+        return;
+      }
+      state.chat.push({ from: 'bot', text: localAnswer });
     } catch (err) {
       console.error('Lendy assistant could not answer from the current data.', err);
       state.chat.push({

@@ -49,6 +49,7 @@ The repository includes a Render Blueprint in `render.yaml`.
    | --- | --- |
    | `FIREBASE_PROJECT_ID` | `borrowing-system-lendy` |
    | `FIREBASE_SERVICE_ACCOUNT_JSON` | The complete JSON for a Firebase service-account key |
+   | `GEMINI_API_KEY` | A Gemini API key from Google AI Studio |
    | `ALLOWED_ORIGINS` | The exact admin dashboard origin(s), comma-separated, with no trailing slash |
 
 4. To create the service-account key, open Firebase Console → **Project
@@ -66,6 +67,22 @@ The repository includes a Render Blueprint in `render.yaml`.
 7. In `admin/firebase-config.js`, set
    `window.LENDY_APPROVAL_API_URL` to the service URL without a trailing slash,
    then publish the updated admin dashboard.
+
+The admin assistant uses Gemini only to turn an admin's question into a
+restricted set of supported database queries. The service verifies the admin,
+reads the relevant Firestore collections, and formats the answer itself; it
+does not send Firestore records or query results to Gemini. Before sending a
+question, it replaces matching account names, emails, and ID numbers with
+temporary tokens and removes email addresses and phone-number-like values.
+The Gemini key stays in Render and must never be added to dashboard JavaScript.
+
+The free Gemini tier has usage limits, and Google may use unpaid-service
+prompts to improve its products. Do not include personal or confidential
+details in a question. Review Google's current [Gemini API terms](https://ai.google.dev/gemini-api/terms)
+and [pricing and free-tier limits](https://ai.google.dev/gemini-api/docs/pricing)
+before enabling it. If the key is missing or the free quota is exhausted, the
+existing local answers continue to work, but questions requiring AI will show
+an error.
 
 The service account must be able to manage Firebase Authentication users and
 read/write Firestore. Grant only the permissions needed for those tasks. The
