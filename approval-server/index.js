@@ -455,15 +455,18 @@ async function classifyAssistantQuestion(question, accountTokens) {
   const operations = [...assistantOperations];
   const tokens = [...accountTokens.keys()];
   const model = process.env.GEMINI_MODEL || "gemini-3.8-flash";
-  const response = await fetch(
-    "https://generativelanguage.googleapis.com/v1/interactions",
-    {
+  const timeoutMs = 45_000;
+  let response;
+  try {
+    response = await fetch(
+      "https://generativelanguage.googleapis.com/v1/interactions",
+      {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
         "x-goog-api-key": apiKey,
       },
-      signal: AbortSignal.timeout(15_000),
+      signal: AbortSignal.timeout(timeoutMs),
       body: JSON.stringify({
         model,
         store: false,
@@ -501,8 +504,16 @@ async function classifyAssistantQuestion(question, accountTokens) {
           },
         },
       }),
-    },
-  );
+      },
+    );
+  } catch (error) {
+    if (error instanceof Error &&
+      (error.name === "TimeoutError" || error.name === "AbortError")) {
+      console.warn("Gemini Interactions request timed out.", { model, timeoutMs });
+      throw new HttpError(504, "The AI assistant request timed out. Please try again.");
+    }
+    throw error;
+  }
   if (!response.ok) {
     const providerBody = await response.text();
     let providerError = null;
@@ -511,19 +522,19 @@ async function classifyAssistantQuestion(question, accountTokens) {
     } catch {
       providerError = null;
     }
+    console.error("Gemini rejected the assistant request.", {
+      status: response.status,
+      model,
+      providerStatus: providerError?.status || null,
+      providerCode: providerError?.code || null,
+      providerMessage: typeof providerError?.message === "string"
+        ? providerError.message.replaceAll(apiKey, "[REDACTED]").slice(0, 400)
+        : null,
+    });
     if (response.status === 429) {
       throw new HttpError(429, "The AI assistant has reached its current usage limit. Try again later.");
     }
     if (response.status === 400 || response.status === 404) {
-      console.error("Gemini rejected the assistant request.", {
-        status: response.status,
-        model,
-        providerStatus: providerError?.status || null,
-        providerCode: providerError?.code || null,
-        providerMessage: typeof providerError?.message === "string"
-          ? providerError.message.replaceAll(apiKey, "[REDACTED]").slice(0, 400)
-          : null,
-      });
       throw new HttpError(502, "The AI assistant could not process that question.");
     }
     throw new HttpError(502, "The AI provider is temporarily unavailable.");
