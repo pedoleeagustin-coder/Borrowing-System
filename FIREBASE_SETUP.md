@@ -75,6 +75,8 @@ does not send Firestore records or query results to Gemini. Before sending a
 question, it replaces matching account names, emails, and ID numbers with
 temporary tokens and removes email addresses and phone-number-like values.
 The Gemini key stays in Render and must never be added to dashboard JavaScript.
+The service uses Gemini 3.8 Flash through the Interactions API with storage
+disabled (`store: false`); only sanitized questions are sent to the model.
 
 The free Gemini tier has usage limits, and Google may use unpaid-service
 prompts to improve its products. Do not include personal or confidential

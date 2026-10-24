@@ -454,8 +454,9 @@ async function classifyAssistantQuestion(question, accountTokens) {
 
   const operations = [...assistantOperations];
   const tokens = [...accountTokens.keys()];
+  const model = process.env.GEMINI_MODEL || "gemini-3.8-flash";
   const response = await fetch(
-    `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(process.env.GEMINI_MODEL || "gemini-2.5-flash")}:generateContent`,
+    "https://generativelanguage.googleapis.com/v1/interactions",
     {
       method: "POST",
       headers: {
@@ -464,35 +465,33 @@ async function classifyAssistantQuestion(question, accountTokens) {
       },
       signal: AbortSignal.timeout(15_000),
       body: JSON.stringify({
-        contents: [{
-          role: "user",
-          parts: [{
-            text: [
-              "Convert the admin's question into up to three database query operations.",
-              "Return only JSON matching the schema. Do not answer the question.",
-              `Allowed operation types: ${operations.join(", ")}.`,
-              "Use accountToken only when the question contains a supplied [ACCOUNT_n] token.",
-              `Available account tokens: ${tokens.length ? tokens.join(", ") : "none"}.`,
-              "Use category only when an equipment type/category is explicitly requested.",
-              "For unrelated, unsupported, or unclear requests return an empty operations array.",
-              "Question:",
-              question,
-            ].join("\n"),
-          }],
-        }],
-        generationConfig: {
-          responseMimeType: "application/json",
-          responseSchema: {
-            type: "OBJECT",
+        model,
+        store: false,
+        input: [
+          "Convert the admin's question into up to three database query operations.",
+          "Return only JSON matching the schema. Do not answer the question.",
+          `Allowed operation types: ${operations.join(", ")}.`,
+          "Use accountToken only when the question contains a supplied [ACCOUNT_n] token.",
+          `Available account tokens: ${tokens.length ? tokens.join(", ") : "none"}.`,
+          "Use category only when an equipment type/category is explicitly requested.",
+          "For unrelated, unsupported, or unclear requests return an empty operations array.",
+          "Question:",
+          question,
+        ].join("\n"),
+        response_format: {
+          type: "text",
+          mime_type: "application/json",
+          schema: {
+            type: "object",
             properties: {
               operations: {
-                type: "ARRAY",
+                type: "array",
                 items: {
-                  type: "OBJECT",
+                  type: "object",
                   properties: {
-                    type: { type: "STRING", enum: operations },
-                    accountToken: { type: "STRING" },
-                    category: { type: "STRING" },
+                    type: { type: "string", enum: operations },
+                    accountToken: { type: "string" },
+                    category: { type: "string" },
                   },
                   required: ["type"],
                 },
@@ -518,7 +517,7 @@ async function classifyAssistantQuestion(question, accountTokens) {
     if (response.status === 400 || response.status === 404) {
       console.error("Gemini rejected the assistant request.", {
         status: response.status,
-        model: process.env.GEMINI_MODEL || "gemini-2.5-flash",
+        model,
         providerStatus: providerError?.status || null,
         providerCode: providerError?.code || null,
         providerMessage: typeof providerError?.message === "string"
@@ -531,8 +530,11 @@ async function classifyAssistantQuestion(question, accountTokens) {
   }
 
   const payload = await response.json();
-  const text = payload.candidates?.[0]?.content?.parts
-    ?.map((part) => part.text || "")
+  const text = payload.steps
+    ?.filter((step) => step.type === "model_output")
+    .flatMap((step) => step.content || [])
+    .filter((part) => part.type === "text")
+    .map((part) => part.text || "")
     .join("");
   if (typeof text !== "string") {
     throw new HttpError(502, "The AI assistant returned an invalid response.");
