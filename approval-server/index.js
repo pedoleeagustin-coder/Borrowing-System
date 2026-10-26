@@ -400,25 +400,37 @@ function findEquipmentInQuestion(question, equipment) {
   });
 }
 
-function equipmentBorrowerAnswer(matchingEquipment, loans, accounts) {
+function equipmentBorrowerAnswer(matchingEquipment, loans, accounts, includeHistory) {
   if (matchingEquipment.length === 0) return null;
   const equipmentById = new Map(matchingEquipment.map((item) => [item.id, item]));
-  const currentLoans = loans.filter((loan) =>
-    loan.status === "approved" && equipmentById.has(loan.equipmentId)
+  const matchingLoans = loans.filter((loan) =>
+    (loan.status === "approved" || loan.status === "returned") &&
+    equipmentById.has(loan.equipmentId)
   );
-  if (currentLoans.length === 0) {
+  if (matchingLoans.length === 0) {
     const names = matchingEquipment.map((item) => item.name);
     return `No one is currently borrowing ${names.length === 1 ? names[0] : names.join(", ")}.`;
   }
 
-  return currentLoans.map((loan) => {
+  const currentLoans = matchingLoans.filter((loan) => loan.status === "approved");
+  const loansToDescribe = includeHistory || currentLoans.length === 0
+    ? matchingLoans
+    : currentLoans;
+  const descriptions = loansToDescribe.map((loan) => {
     const item = equipmentById.get(loan.equipmentId);
     const account = loan.borrowerUid
       ? accounts.find((entry) => entry.id === loan.borrowerUid)
       : null;
     const borrower = account?.name || loan.borrower || "Unknown borrower";
-    return `${borrower} borrowed ${item.name}${loan.end ? ` (due ${loan.end})` : ""}.`;
-  }).join(" ");
+    if (loan.status === "returned") {
+      return `${borrower} previously borrowed ${item.name}${loan.returnedOn ? ` (returned ${loan.returnedOn})` : ""}.`;
+    }
+    return `${borrower} is currently borrowing ${item.name}${loan.end ? ` (due ${loan.end})` : ""}.`;
+  });
+  if (currentLoans.length === 0 && !includeHistory) {
+    return `No one is currently borrowing ${matchingEquipment.map((item) => item.name).join(", ")}. ${descriptions.join(" ")}`;
+  }
+  return descriptions.join(" ");
 }
 
 function vagueEquipmentQuestion(question) {
@@ -781,6 +793,7 @@ async function answerAssistant(data, adminUid) {
         matchingEquipment,
         loans,
         accounts,
+        /\b(history|histor(?:y|ies|ical)|previous(?:ly)?|before|ever|past|returned)\b/i.test(question),
       );
       if (answer !== null) return { answer };
     }
