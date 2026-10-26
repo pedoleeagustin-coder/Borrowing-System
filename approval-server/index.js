@@ -379,6 +379,52 @@ const assistantOperations = new Set([
 ]);
 const assistantRequests = new Map();
 
+function findEquipmentInQuestion(question, equipment) {
+  return equipment.filter((item) => {
+    const name = String(item.name || "").trim();
+    return name && new RegExp(
+      `(^|[^a-z0-9])${escapeRegExp(name)}(?=$|[^a-z0-9])`,
+      "i",
+    ).test(question);
+  }).filter((item, _, matches) => {
+    const name = String(item.name || "").trim().toLowerCase();
+    return !matches.some((other) => {
+      const otherName = String(other.name || "").trim().toLowerCase();
+      return otherName.length > name.length &&
+        otherName.includes(name) &&
+        new RegExp(
+          `(^|[^a-z0-9])${escapeRegExp(otherName)}(?=$|[^a-z0-9])`,
+          "i",
+        ).test(question);
+    });
+  });
+}
+
+function equipmentBorrowerAnswer(matchingEquipment, loans, accounts) {
+  if (matchingEquipment.length === 0) return null;
+  const equipmentById = new Map(matchingEquipment.map((item) => [item.id, item]));
+  const currentLoans = loans.filter((loan) =>
+    loan.status === "approved" && equipmentById.has(loan.equipmentId)
+  );
+  if (currentLoans.length === 0) {
+    const names = matchingEquipment.map((item) => item.name);
+    return `No one is currently borrowing ${names.length === 1 ? names[0] : names.join(", ")}.`;
+  }
+
+  return currentLoans.map((loan) => {
+    const item = equipmentById.get(loan.equipmentId);
+    const account = loan.borrowerUid
+      ? accounts.find((entry) => entry.id === loan.borrowerUid)
+      : null;
+    const borrower = account?.name || loan.borrower || "Unknown borrower";
+    return `${borrower} borrowed ${item.name}${loan.end ? ` (due ${loan.end})` : ""}.`;
+  }).join(" ");
+}
+
+function vagueEquipmentQuestion(question) {
+  return !/\b(?:who|what|when|where|why|how|is|are|can|does|did|do|available|borrow(?:ed|ing)?|borrower|due|overdue|status|location|category|maintenance|return(?:ed)?|loan|loans|inventory|count|many|list|show|tell|give)\b/i.test(question);
+}
+
 function escapeRegExp(value) {
   return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
@@ -698,9 +744,6 @@ async function answerAssistant(data, adminUid) {
   if (typeof question !== "string" || question.trim().length === 0 || question.length > 200) {
     throw new HttpError(400, "Enter a question of no more than 200 characters.");
   }
-  if (!process.env.GEMINI_API_KEY) {
-    throw new HttpError(503, "The AI assistant is not configured yet.");
-  }
   const now = Date.now();
   const recent = (assistantRequests.get(adminUid) || [])
     .filter((timestamp) => now - timestamp < 60_000);
@@ -714,6 +757,37 @@ async function answerAssistant(data, adminUid) {
     ...document.data(),
     id: document.id,
   }));
+  const asksWhoBorrowed = /\bwho\b[\s\S]*\b(?:borrow(?:ed|ing)?|has|have|using|checked\s*out)\b/i.test(question);
+  if (asksWhoBorrowed || vagueEquipmentQuestion(question)) {
+    const equipmentSnapshot = await db.collection("equipment").get();
+    const equipment = equipmentSnapshot.docs.map((document) => ({
+      ...document.data(),
+      id: document.id,
+    }));
+    const matchingEquipment = findEquipmentInQuestion(question, equipment);
+    if (matchingEquipment.length > 0) {
+      if (!asksWhoBorrowed && vagueEquipmentQuestion(question)) {
+        const names = matchingEquipment.map((item) => item.name).join(", ");
+        return {
+          answer: `What would you like to know about ${names}? You can ask who borrowed it, whether it is available, or when it is due. For example: "Who borrowed the ${matchingEquipment[0].name}?"`,
+        };
+      }
+      const loanSnapshot = await db.collection("loans").get();
+      const loans = loanSnapshot.docs.map((document) => ({
+        ...document.data(),
+        id: document.id,
+      }));
+      const answer = equipmentBorrowerAnswer(
+        matchingEquipment,
+        loans,
+        accounts,
+      );
+      if (answer !== null) return { answer };
+    }
+  }
+  if (!process.env.GEMINI_API_KEY) {
+    throw new HttpError(503, "The AI assistant is not configured yet.");
+  }
   const { question: sanitizedQuestion, accountTokens } =
     sanitizeQuestion(question, accounts);
   const operations = await classifyAssistantQuestion(
