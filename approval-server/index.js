@@ -2,16 +2,33 @@ const { initializeApp, cert } = require("firebase-admin/app");
 const { getAuth } = require("firebase-admin/auth");
 const { getFirestore } = require("firebase-admin/firestore");
 const http = require("node:http");
+const fs = require("node:fs/promises");
+const path = require("node:path");
 
 const port = Number(process.env.PORT || 8080);
 const projectId = process.env.FIREBASE_PROJECT_ID;
 const serviceAccountJson = process.env.FIREBASE_SERVICE_ACCOUNT_JSON;
+const adminDirectory = path.resolve(__dirname, "../admin");
+const staticContentTypes = {
+  ".css": "text/css; charset=utf-8",
+  ".html": "text/html; charset=utf-8",
+  ".ico": "image/x-icon",
+  ".js": "text/javascript; charset=utf-8",
+  ".json": "application/json; charset=utf-8",
+  ".png": "image/png",
+  ".svg": "image/svg+xml",
+  ".webp": "image/webp",
+};
+const renderOrigin = process.env.RENDER_EXTERNAL_HOSTNAME
+  ? `https://${process.env.RENDER_EXTERNAL_HOSTNAME}`
+  : null;
 const allowedOrigins = new Set(
   (process.env.ALLOWED_ORIGINS || "")
     .split(",")
     .map((origin) => origin.trim())
     .filter(Boolean),
 );
+if (renderOrigin) allowedOrigins.add(renderOrigin);
 
 if (!projectId) throw new Error("FIREBASE_PROJECT_ID must be configured.");
 if (!serviceAccountJson) {
@@ -60,6 +77,43 @@ function sendJson(response, status, body, origin) {
     "Vary": "Origin",
   });
   response.end(JSON.stringify(body));
+}
+
+async function serveAdminFile(request, response) {
+  if (request.method !== "GET" && request.method !== "HEAD") return false;
+
+  let pathname;
+  try {
+    pathname = decodeURIComponent(new URL(request.url, "http://localhost").pathname);
+  } catch {
+    response.writeHead(400);
+    response.end();
+    return true;
+  }
+  const relativePath = pathname === "/" ? "index.html" : pathname.slice(1);
+  const filePath = path.resolve(adminDirectory, relativePath);
+  if (!filePath.startsWith(adminDirectory + path.sep)) {
+    response.writeHead(404);
+    response.end();
+    return true;
+  }
+
+  let content;
+  try {
+    content = await fs.readFile(filePath);
+  } catch (error) {
+    if (error.code === "ENOENT" || error.code === "EISDIR") return false;
+    throw error;
+  }
+
+  response.writeHead(200, {
+    "Cache-Control": "no-store",
+    "Content-Type": staticContentTypes[path.extname(filePath).toLowerCase()] ||
+      "application/octet-stream",
+    "X-Content-Type-Options": "nosniff",
+  });
+  response.end(request.method === "HEAD" ? undefined : content);
+  return true;
 }
 
 function readJson(request) {
@@ -853,6 +907,15 @@ const server = http.createServer(async (request, response) => {
       "Content-Type": "application/json; charset=utf-8",
     });
     response.end(JSON.stringify({ status: "ok" }));
+    return;
+  }
+
+  try {
+    if (await serveAdminFile(request, response)) return;
+  } catch (error) {
+    console.error("Could not serve an admin dashboard file.", error);
+    response.writeHead(500, { "Content-Type": "text/plain; charset=utf-8" });
+    response.end("Could not load the admin dashboard.");
     return;
   }
 

@@ -1,21 +1,10 @@
 services:
   - type: web
-    name: lendy-admin
-    runtime: static
-    rootDir: admin
-    buildCommand: echo "No build required"
-    staticPublishPath: .
-    headers:
-      - path: /*
-        name: Cache-Control
-        value: no-cache, no-store, must-revalidate
-  - type: web
     name: lendy-account-approval
     runtime: node
     plan: free
-    rootDir: approval-server
-    buildCommand: npm ci
-    startCommand: npm start
+    buildCommand: cd approval-server && npm ci
+    startCommand: node approval-server/index.js
     healthCheckPath: /health
     envVars:
       - key: FIREBASE_PROJECT_ID
