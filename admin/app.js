@@ -647,13 +647,14 @@
           if (st === 'borrowed') acts = '<button class="btn btn-ghost btn-sm" data-action="return" data-id="' + al.id + '">' + icon('undo', 'w-3.5 h-3.5') + 'Mark returned</button>' + qrBtn;
           else if (st === 'available') acts = '<button class="btn btn-ghost btn-sm" data-action="maintenance-on" data-id="' + e.id + '">' + icon('wrench', 'w-3.5 h-3.5') + 'Maintenance</button>' +
             qrBtn + '<button class="btn btn-ghost btn-sm" data-action="delete-item" data-id="' + e.id + '" aria-label="Remove ' + esc(e.name) + '">' + icon('trash', 'w-3.5 h-3.5') + '</button>';
-          else acts = '<button class="btn btn-ghost btn-sm" data-action="maintenance-off" data-id="' + e.id + '">Back in service</button>' +
+          else acts = '<button class="btn btn-ghost btn-sm" data-action="edit-equipment" data-id="' + e.id + '">' + icon('pencil', 'w-3.5 h-3.5') + 'Edit</button>' +
+            '<button class="btn btn-ghost btn-sm" data-action="maintenance-off" data-id="' + e.id + '">Back in service</button>' +
             qrBtn + '<button class="btn btn-ghost btn-sm" data-action="delete-item" data-id="' + e.id + '" aria-label="Remove ' + esc(e.name) + '">' + icon('trash', 'w-3.5 h-3.5') + '</button>';
           return '<div class="grid ' + C + ' gap-3 px-4 py-3 items-center text-[13px] border-t border-line">' +
             '<span class="flex items-center gap-3 min-w-0">' + mediaTile(e, 'w-9 h-9') + '<span class="min-w-0"><span class="block font-medium truncate">' + esc(e.name) + '</span><span class="block text-[11px] text-muted">' + esc(e.tag) + '</span></span></span>' +
             '<span class="text-muted">' + esc(e.category) + '</span>' +
             '<span><span>' + pill(st) + '</span>' + sub + '</span>' +
-            '<span class="flex items-center justify-end gap-2">' + acts + '</span></div>';
+            '<span class="flex flex-wrap items-center justify-end gap-2">' + acts + '</span></div>';
         }).join('') + '</div></div>';
     } else if (!all.length) {
       table = emptyState('archive', 'Your inventory is empty', 'Add the equipment people can borrow. Everything on the dashboard updates as you go.',
@@ -1017,24 +1018,32 @@
       '<p id="form-error" class="text-sm t-bad min-h-[1.25rem]" role="alert"></p>' +
       '<div class="flex justify-end gap-2"><button type="button" class="btn btn-ghost" data-action="close-modal">Cancel</button><button type="submit" class="btn btn-primary">Create request</button></div></form>';
   }
-  function addForm() {
-    return modalHead('Add equipment', 'New items start as available.') +
-      '<form data-form="add" novalidate class="mt-5 grid gap-4">' +
-      '<div><label class="lbl" for="f-name">Name</label><input id="f-name" name="name" class="field" placeholder="e.g. Sony A7 Camera" maxlength="60" autocomplete="off"></div>' +
-      '<div><label class="lbl" for="f-location">Location</label><input id="f-location" name="location" class="field" placeholder="e.g. AV Storage, Room 101" maxlength="80" autocomplete="off"></div>' +
+  function addForm(item) {
+    var editing = !!item;
+    var knownCategory = Object.prototype.hasOwnProperty.call(CATEGORIES, item && item.category) && item.category !== 'Other';
+    var selectedCategory = editing ? (knownCategory ? item.category : 'Other') : 'Computers';
+    var imagePreview = item && item.image
+      ? '<img src="' + esc(item.image) + '" class="w-full h-full object-cover" alt="">'
+      : icon('box', 'w-6 h-6');
+    return modalHead(editing ? 'Edit equipment details' : 'Add equipment',
+      editing ? 'Update the equipment information. Its maintenance status will not change.' : 'New items start as available.') +
+      '<form data-form="' + (editing ? 'edit-equipment' : 'add') + '"' + (editing ? ' data-id="' + esc(item.id) + '"' : '') + ' novalidate class="mt-5 grid gap-4">' +
+      '<div><label class="lbl" for="f-name">Name</label><input id="f-name" name="name" class="field" placeholder="e.g. Sony A7 Camera" maxlength="60" autocomplete="off" value="' + esc(editing ? item.name : '') + '"></div>' +
+      '<div><label class="lbl" for="f-location">Location</label><input id="f-location" name="location" class="field" placeholder="e.g. AV Storage, Room 101" maxlength="80" autocomplete="off" value="' + esc(editing ? item.location : '') + '"></div>' +
       '<div class="grid grid-cols-2 gap-3">' +
       '<div><label class="lbl" for="f-cat">Category</label><select id="f-cat" name="category" class="field">' +
-      Object.keys(CATEGORIES).map(function (c) { return '<option>' + c + '</option>'; }).join('') + '</select>' +
-      '<div id="f-custom-category-wrap" class="mt-3" hidden><label class="lbl" for="f-custom-category">New category</label>' +
-      '<input id="f-custom-category" name="customCategory" class="field" placeholder="Enter category name" maxlength="40" autocomplete="off"></div></div>' +
-      '<div><label class="lbl" for="f-tag">Asset tag <span class="font-normal">(optional)</span></label><input id="f-tag" name="tag" class="field" placeholder="Auto-generated" maxlength="16" autocomplete="off"></div></div>' +
+      Object.keys(CATEGORIES).map(function (c) { return '<option' + (c === selectedCategory ? ' selected' : '') + '>' + c + '</option>'; }).join('') + '</select>' +
+      '<div id="f-custom-category-wrap" class="mt-3"' + (selectedCategory === 'Other' ? '' : ' hidden') + '><label class="lbl" for="f-custom-category">' + (editing ? 'Category name' : 'New category') + '</label>' +
+      '<input id="f-custom-category" name="customCategory" class="field" placeholder="Enter category name" maxlength="40" autocomplete="off" value="' + esc(editing && !knownCategory ? item.category : '') + '"></div></div>' +
+      '<div><label class="lbl" for="f-tag">Asset tag <span class="font-normal">(optional)</span></label><input id="f-tag" name="tag" class="field" placeholder="Auto-generated" maxlength="16" autocomplete="off" value="' + esc(editing ? item.tag : '') + '"></div></div>' +
       '<div><label class="lbl" for="f-image">Photo <span class="font-normal">(optional)</span></label>' +
       '<div class="flex items-center gap-3">' +
-      '<span id="image-preview" class="shrink-0 w-14 h-14 rounded-xl bg-tint text-brand flex items-center justify-center overflow-hidden">' + icon('box', 'w-6 h-6') + '</span>' +
+      '<span id="image-preview" class="shrink-0 w-14 h-14 rounded-xl bg-tint text-brand flex items-center justify-center overflow-hidden">' + imagePreview + '</span>' +
       '<input id="f-image" name="image" type="file" accept="image/*" class="field" style="padding:.5rem .7rem"></div>' +
-      '<p class="text-[11px] text-muted mt-1.5">JPG or PNG. It\u2019s resized automatically before saving.</p></div>' +
+      '<p class="text-[11px] text-muted mt-1.5">JPG or PNG. It\u2019s resized automatically before saving.</p>' +
+      (editing && item.image ? '<label class="flex items-center gap-2 text-xs text-muted"><input type="checkbox" name="removeImage" class="w-4 h-4" style="accent-color:var(--brand)"> Remove current photo</label>' : '') + '</div>' +
       '<p id="form-error" class="text-sm t-bad min-h-[1.25rem]" role="alert"></p>' +
-      '<div class="flex justify-end gap-2"><button type="button" class="btn btn-ghost" data-action="close-modal">Cancel</button><button type="submit" class="btn btn-primary">Add equipment</button></div></form>';
+      '<div class="flex justify-end gap-2"><button type="button" class="btn btn-ghost" data-action="close-modal">Cancel</button><button type="submit" class="btn btn-primary">' + (editing ? 'Save details' : 'Add equipment') + '</button></div></form>';
   }
   function confirmBody(m) {
     return modalHead(esc(m.title)) + '<p class="text-sm text-muted mt-3">' + esc(m.body) + '</p>' +
@@ -1158,7 +1167,8 @@
   function renderModal() {
     var m = state.modal, root = $('#modal-root');
     if (!m) { root.innerHTML = ''; return; }
-    var inner = m.type === 'request' ? requestForm(m) : m.type === 'add' ? addForm() : m.type === 'qr' ? qrBody(m) :
+    var inner = m.type === 'request' ? requestForm(m) : m.type === 'add' ? addForm() : m.type === 'edit-equipment' ?
+      (eqById(m.id) ? addForm(eqById(m.id)) : modalHead('Equipment unavailable') + '<p class="text-sm text-muted mt-3">This item may have been removed from the inventory.</p>') : m.type === 'qr' ? qrBody(m) :
       m.type === 'approve-account' ? approveAccountForm(m) :
       m.type === 'edit-profile' ? editProfileForm() : m.type === 'change-password' ? changePasswordBody() :
       m.type === 'account' ? accountBody(m) : m.type === 'user-detail' ? userDetailBody(m) : confirmBody(m);
@@ -1241,6 +1251,47 @@
       .catch(function (err) {
         if (submitBtn) submitBtn.disabled = false;
         formError(err.message);
+      });
+  }
+
+  function submitEditEquipment(form) {
+    var item = eqById(form.dataset.id);
+    if (!item || !item.maintenance) {
+      closeModal();
+      toast('This equipment is no longer in maintenance.', 'bad');
+      return;
+    }
+    var f = new FormData(form);
+    var name = String(f.get('name') || '').trim(), catRaw = String(f.get('category') || '');
+    if (!name) return formError('Give the item a name.');
+    name = name.charAt(0).toLocaleUpperCase() + name.slice(1);
+    var location = String(f.get('location') || '').trim();
+    if (!location) return formError('Enter the item location.');
+    var cat = catRaw === 'Other' ? String(f.get('customCategory') || '').trim() : catRaw;
+    if (!cat) return formError('Enter a name for the category.');
+    var file = form.elements.image && form.elements.image.files[0];
+    var removeImage = f.get('removeImage') === 'on';
+    var submitBtn = form.querySelector('button[type=submit]');
+    if (submitBtn) submitBtn.disabled = true;
+    compressImage(file)
+      .then(function (imageData) {
+        var tag = String(f.get('tag') || '').trim().toUpperCase() || item.tag ||
+          ((TAG_PREFIX[cat] || 'OT') + '-' + item.id.slice(0, 4).toUpperCase());
+        return equipmentCol.doc(item.id).update({
+          name: name,
+          category: cat,
+          tag: tag,
+          location: location,
+          image: imageData || (removeImage ? null : item.image || null)
+        });
+      })
+      .then(function () {
+        closeModal();
+        toast('Updated ' + name + ' details.');
+      })
+      .catch(function (err) {
+        if (submitBtn) submitBtn.disabled = false;
+        formError('Could not save: ' + err.message);
       });
   }
 
@@ -1508,6 +1559,10 @@
       case 'return': markReturned(id); break;
       case 'maintenance-on': setMaintenance(id, true); break;
       case 'maintenance-off': setMaintenance(id, false); break;
+      case 'edit-equipment':
+        var equipment = eqById(id);
+        if (equipment && equipment.maintenance) openModal({ type: 'edit-equipment', id: id });
+        break;
       case 'delete-item':
         var e = eqById(id); if (!e) break;
         pendingConfirm = function () { deleteItem(id); };
@@ -1585,6 +1640,7 @@
     var form = ev.target;
     if (form.dataset.form === 'request') submitRequest(form);
     else if (form.dataset.form === 'add') submitAdd(form);
+    else if (form.dataset.form === 'edit-equipment') submitEditEquipment(form);
     else if (form.dataset.form === 'approve-account') submitApproveRequest(form);
     else if (form.dataset.form === 'edit-profile') submitEditProfile(form);
     else if (form.id === 'assistant-form') submitAssistant(form);

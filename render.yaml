@@ -1,5 +1,15 @@
 services:
   - type: web
+    name: lendy-admin
+    runtime: static
+    rootDir: admin
+    buildCommand: echo "No build required"
+    staticPublishPath: .
+    headers:
+      - path: /*
+        name: Cache-Control
+        value: no-cache, no-store, must-revalidate
+  - type: web
     name: lendy-account-approval
     runtime: node
     plan: free
